@@ -4,7 +4,7 @@ from airflow.operators.sensors import S3KeySensor
 import sys
 import os
 from airflow.models import Variable
-sys.path.append('/home/max/airflow/dags/cassandra-uploader/')
+sys.path.append('./cassandra-uploader/')
 import datetime
 from datetime import timedelta
 from upload import putInCassandra
