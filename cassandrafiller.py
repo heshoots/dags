@@ -85,17 +85,16 @@ s3ready = S3KeySensor( task_id='s3_file',
    poke_interval=0,
    timeout=15,
    soft_fail=False,
-   bucket_key='s3://dms-deploy/flood-monitoring/archive/readings-full-{{ ds }}.csv.gz',
+   bucket_key='s3://dms-deploy/flood-monitoring/archive/readings-full-{{ yesterday_ds }}.csv.gz',
    bucket_name=None,
    s3_conn_id=Variable.get("s3_connection"),
    dag=dag)
 
 
 def doDatafile(cassandra, credentials, **kwargs):
-    execution_date = kwargs['execution_date']
-    formatted = execution_date.strftime("%Y-%m-%d")
+    yesterday_ds = kwargs['yesterday_ds']
 
-    filename = "readings-full-" + formatted + ".csv.gz"
+    filename = "readings-full-" + yesterday_ds + ".csv.gz"
     s3 = boto3.resource("s3",
       aws_access_key_id=credentials['aws_access_key_id'],
       aws_secret_access_key=credentials['aws_secret_access_key'])
