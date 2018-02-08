@@ -72,7 +72,7 @@ def putInCassandra(s3file, cassandraConnection):
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
-    'start_date': datetime.datetime(2017, 1, 3),
+    'start_date': datetime.datetime(2015, 2, 2),
     'email': ['airflow@airflow.com'],
     'email_on_failure': False,
     'email_on_retry': False,
