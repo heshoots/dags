@@ -1,6 +1,7 @@
 from cassandra.cluster import Cluster
 from cassandra.query import BatchStatement
 from cassandra.query import ConsistencyLevel
+from cassandra.auth import PlainTextAuthProvider
 import csv
 import gzip
 import codecs
@@ -24,30 +25,32 @@ import botocore
 def createRow(row):
     date = row["date"]
     dateTime = datetime.datetime.strptime(row["dateTime"], '%Y-%m-%dT%H:%M:%SZ')
-    stationReference = row["stationReference"]
-    meta = {"parameter": row["parameter"], "qualifier": row["qualifier"]}
+    # get last part of measure url
+    measureReference = row["measure"].split("/")[-1]
+    meta = {"parameter=" + row["parameter"], "qualifier=" + row["qualifier"]}
     values = row["value"].split("|")
+    state = {"state=good"}
+    # a value such as 1.0|0.0 implies something is wrong at the station
     if len(values) > 1:
-        meta.update({"state": "bad"})
-    else:
-        meta.update({"state": "good"})
+        state = {"state=bad"}
+    meta.update(state)
+    # in all cases (including bad state, we take the first value given)
     value = float(values[0])
-    return (date, dateTime, stationReference, meta, value)
+    return (date, dateTime, measureReference, meta, value)
 
 
-def cassandraConnection(clusterHostname):
-    print("Connecting to: " + clusterHostname)
-    cluster = Cluster([clusterHostname])
+def getSession(cassandraConnection):
+    print("Connecting to: " + cassandraConnection.host)
+    auth_provider = PlainTextAuthProvider(
+            username=cassandraConnection.login, password=cassandraConnection.password)
+    cluster = Cluster([cassandraConnection.host], auth_provider=auth_provider)
     cluster.connect()
-    session = cluster.connect()
-    print("Connected")
-    session.execute("CREATE KEYSPACE IF NOT EXISTS dev WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': 2}")
-    session.execute("CREATE TABLE IF NOT EXISTS dev.measures ( date text, timestamp timestamp, stationReference text, meta map<text,text>, value double, PRIMARY KEY ((date), stationReference, timestamp))")
-    return (cluster, session)
+    return cluster.connect(cassandraConnection.schema)
 
-def putInCassandra(s3file, clusterHostname):
-    (cluster, session) = cassandraConnection(clusterHostname)
-    prepared = session.prepare("INSERT INTO dev.measures (date, timestamp, stationReference, meta, value) VALUES (?, ?, ?, ?, ?)")
+def putInCassandra(s3file, cassandraConnection):
+    session = getSession(cassandraConnection)
+    measures_by_date = session.prepare("INSERT INTO measures_by_date (date, timestamp, measureReference, meta, value) VALUES (?, ?, ?, ?, ?)")
+    measures_by_measurereference = session.prepare("INSERT INTO measures_by_measurereference (date, timestamp, measureReference, meta, value) VALUES (?, ?, ?, ?, ?)")
     batch = BatchStatement(consistency_level=ConsistencyLevel.QUORUM)
     batch_number = 10
     print("Opening File")
@@ -59,13 +62,12 @@ def putInCassandra(s3file, clusterHostname):
                 session.execute(batch)
                 batch.clear()
                 count = 0
-            batch.add(prepared, createRow(row))
-            count += 1
+            batch.add(measures_by_measurereference, createRow(row))
+            batch.add(measures_by_date, createRow(row))
+            count += 2
         session.execute(batch)
         batch.clear()
     print("Done")
-
-#
 
 default_args = {
     'owner': 'airflow',
@@ -79,7 +81,7 @@ default_args = {
 }
 
 dag = DAG(
-    'dms-cassandraV2', default_args=default_args, schedule_interval='@daily')
+    'dms-cassandra', default_args=default_args, schedule_interval='@daily')
 
 s3ready = S3KeySensor( task_id='s3_file',
    poke_interval=0,
@@ -91,15 +93,11 @@ s3ready = S3KeySensor( task_id='s3_file',
    dag=dag)
 
 
-def doDatafile(cassandra, credentials, **kwargs):
-    yesterday_ds = kwargs['yesterday_ds']
-
-    filename = "readings-full-" + yesterday_ds + ".csv.gz"
+def downloadDatafile(date, credentials):
+    filename = "readings-full-" + date + ".csv.gz"
     s3 = boto3.resource("s3",
       aws_access_key_id=credentials['aws_access_key_id'],
       aws_secret_access_key=credentials['aws_secret_access_key'])
-    print("connecting to: " + cassandra)
-    clusterHostname = cassandra
     try:
         print("Downloading File")
         s3.Bucket("dms-deploy").download_file("flood-monitoring/archive/" + filename, filename)
@@ -108,17 +106,20 @@ def doDatafile(cassandra, credentials, **kwargs):
             print("object doesn't exist")
         else:
             raise
-    putInCassandra(filename, clusterHostname)
-    os.remove(filename)
-    return
+    return filename
 
+def insertDailyDump(cassandra, credentials, **kwargs):
+    yesterday_ds = kwargs['yesterday_ds']
+    filename = downloadDatafile(yesterday_ds, credentials)
+    putInCassandra(filename, cassandra)
+    os.remove(filename)
 
 connection = BaseHook.get_connection("s3_conn")
 extra = connection.extra
 parsed_extra = json.loads(extra)
-cassandra = Variable.get("cassandrahost")
+cassandra = BaseHook.get_connection("cassandra_connection")
 putIn = PythonOperator( task_id='put_in_cassandra',
-        python_callable=doDatafile,
+        python_callable=insertDailyDump,
         provide_context=True,
         op_kwargs={'cassandra': cassandra, 'credentials': parsed_extra},
         dag=dag)
