@@ -81,7 +81,7 @@ default_args = {
 }
 
 dag = DAG(
-    'dms-cassandra', default_args=default_args, schedule_interval='@daily')
+    'dms-cassandraV2', default_args=default_args, schedule_interval='@daily')
 
 s3ready = S3KeySensor( task_id='s3_file',
    poke_interval=0,
